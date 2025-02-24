@@ -7,6 +7,9 @@ use App\Http\Requests\Post\PostRequest;
 use App\Models\Post;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
+use App\Http\Resources\Post\PostResource;
+use App\Http\Resources\Post\PostCollection;
 
 class PostController extends Controller
 {
@@ -17,20 +20,26 @@ class PostController extends Controller
 
     public function index(Request $request)
     {
-        // Cache danh sách bài viết trong 5 phút
-        $page = $request->get('page', 1);
-        $cacheKey = 'posts_page_' . $page;
-        
-        $posts = Cache::remember($cacheKey, 300, function () {
-            return Post::with(['user:id,name', 'comments' => function($query) {
-                $query->withCount('replies');
-            }])
-            ->withCount('comments')
+        $posts = Post::with('user:id,name')
+            ->select('posts.*')
+            ->selectSub(
+                DB::table('comments')
+                    ->whereColumn('post_id', 'posts.id')
+                    ->whereNull('parent_id')
+                    ->selectRaw('COUNT(*)'),
+                'total_comments'
+            )
+            ->selectSub(
+                DB::table('comments')
+                    ->whereColumn('post_id', 'posts.id')
+                    ->whereNotNull('parent_id')
+                    ->selectRaw('COUNT(*)'),
+                'total_replies'
+            )
             ->latest()
             ->paginate(10);
-        });
 
-        return response()->json($posts);
+        return new PostCollection($posts);
     }
 
     public function store(PostRequest $request)
@@ -41,26 +50,43 @@ class PostController extends Controller
             'user_id' => auth()->id()
         ]);
 
-        Cache::flush();
-
-        return response()->json([
-            'message' => 'Tạo bài viết thành công',
-            'post' => $post->load('user:id,name')
-        ], 201);
+        return (new PostResource($post->load('user:id,name')))
+            ->additional([
+                'message' => 'Tạo bài viết thành công'
+            ]);
     }
 
     public function show(Post $post)
     {
-        $cacheKey = 'post_' . $post->id;
-        
-        $post = Cache::remember($cacheKey, 300, function () use ($post) {
-            return $post->load(['user:id,name', 'comments' => function($query) {
-                $query->with('user:id,name')
-                    ->withCount('replies');
-            }]);
-        });
+        $post = Post::where('id', $post->id)
+            ->select('posts.*')
+            ->selectSub(
+                DB::table('comments')
+                    ->whereColumn('post_id', 'posts.id')
+                    ->whereNull('parent_id')
+                    ->selectRaw('COUNT(*)'),
+                'total_comments'
+            )
+            ->selectSub(
+                DB::table('comments')
+                    ->whereColumn('post_id', 'posts.id')
+                    ->whereNotNull('parent_id')
+                    ->selectRaw('COUNT(*)'),
+                'total_replies'
+            )
+            ->with(['user:id,name', 'comments' => function($query) {
+                $query->with(['user:id,name'])
+                    ->whereNull('parent_id')
+                    ->orderBy('created_at', 'desc')
+                    ->with(['replies' => function($query) {
+                        $query->with(['user:id,name', 'replies.user:id,name', 'replies' => function($query) {
+                            $query->with('replies.user:id,name');
+                        }]);
+                    }]);
+            }])
+            ->first();
 
-        return response()->json($post);
+        return new PostResource($post);
     }
 
     public function update(PostRequest $request, Post $post)
@@ -72,14 +98,10 @@ class PostController extends Controller
             'content' => $request->content
         ]);
 
-        // Clear cache của bài viết này
-        Cache::forget('post_' . $post->id);
-        Cache::flush();
-
-        return response()->json([
-            'message' => 'Cập nhật bài viết thành công',
-            'post' => $post->load('user:id,name')
-        ]);
+        return (new PostResource($post->load('user:id,name')))
+            ->additional([
+                'message' => 'Cập nhật bài viết thành công'
+            ]);
     }
 
     public function destroy(Post $post)
@@ -88,12 +110,8 @@ class PostController extends Controller
 
         $post->delete();
 
-        // Clear cache
-        Cache::forget('post_' . $post->id);
-        Cache::flush();
-
         return response()->json([
             'message' => 'Xóa bài viết thành công'
         ]);
     }
-} 
+}
